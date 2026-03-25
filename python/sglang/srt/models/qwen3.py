@@ -44,6 +44,12 @@ if _is_npu:
     from sglang.srt.hardware_backend.npu.cmo import get_cmo_stream, wait_cmo_stream
 
 
+# Aligned with HF's implementation, using sliding window inclusive with the last token
+# SGLang assumes exclusive
+def get_attention_sliding_window_size(config):
+    return config.sliding_window - 1 if hasattr(config, "sliding_window") else None
+
+
 class Qwen3Attention(nn.Module):
     def __init__(
         self,
@@ -57,6 +63,7 @@ class Qwen3Attention(nn.Module):
         max_position_embeddings: int = 32768,
         quant_config: Optional[QuantizationConfig] = None,
         rms_norm_eps: float = None,
+        config=None,
         attention_bias: bool = False,
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
@@ -128,12 +135,21 @@ class Qwen3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
+        self.is_sliding = (
+            config.layer_types[layer_id] == "sliding_attention"
+            if getattr(config, "layer_types", None) is not None
+            else False
+        )
+
         self.attn = RadixAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
+            sliding_window_size=(
+                get_attention_sliding_window_size(config) if self.is_sliding else None
+            ),
             prefix=add_prefix("attn", prefix),
         )
         self.alt_stream = alt_stream
@@ -232,6 +248,7 @@ class Qwen3DecoderLayer(nn.Module):
             quant_config=quant_config,
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=config.attention_bias,
+            config=config,
             prefix=add_prefix("self_attn", prefix),
             alt_stream=alt_stream,
         )
@@ -395,6 +412,9 @@ class Qwen3ForCausalLM(nn.Module):
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.get_input_embeddings()
+
+    def get_attention_sliding_window_size(self):
+        return get_attention_sliding_window_size(self.config)
 
     @torch.no_grad()
     def forward(
